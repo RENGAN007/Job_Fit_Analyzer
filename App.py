@@ -2,10 +2,13 @@ import streamlit as st
 import os
 import re
 import pdfplumber
-import chromadb
 import requests
 from groq import Groq
-
+try:
+    import chromadb
+except Exception:
+    chromadb = None
+    
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Job-Fit Analyzer",
