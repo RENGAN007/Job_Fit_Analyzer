@@ -157,7 +157,10 @@ def run_analysis(resume_text: str, job_description: str) -> str:
         resume_embedding = get_embeddings((resume_clean,))[0]
 
     # ChromaDB ephemeral in-memory client (safe for Streamlit Cloud)
-    chroma_client = chromadb.EphemeralClient()
+    if chromadb is None:
+    st.error("ChromaDB failed to load. Please check dependencies.")
+    st.stop()
+    client = chromadb.EphemeralClient()
 
     # Always create a fresh collection per analysis run
     try:
