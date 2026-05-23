@@ -160,7 +160,7 @@ def run_analysis(resume_text: str, job_description: str) -> str:
     if chromadb is None:
     st.error("ChromaDB failed to load. Please check dependencies.")
     st.stop()
-    client = chromadb.EphemeralClient()
+client = chromadb.EphemeralClient()
 
     # Always create a fresh collection per analysis run
     try:
