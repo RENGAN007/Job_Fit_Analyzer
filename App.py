@@ -1,14 +1,11 @@
 import streamlit as st
 import os
 import re
+import numpy as np
 import pdfplumber
 import requests
 from groq import Groq
-try:
-    import chromadb
-except Exception:
-    chromadb = None
-    
+
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Job-Fit Analyzer",
@@ -20,18 +17,15 @@ st.set_page_config(
 
 def load_secret(key_name):
     """Load a secret from Streamlit secrets → env var → api.txt fallback."""
-    # 1. Streamlit secrets (used on Streamlit Cloud)
     try:
         val = st.secrets.get(key_name)
         if val:
             return str(val).strip()
     except Exception:
         pass
-    # 2. Environment variable (used locally with .env)
     val = os.getenv(key_name)
     if val:
         return val.strip()
-    # 3. api.txt fallback (local dev convenience)
     try:
         with open("api.txt", "r", encoding="utf-8") as f:
             for line in f:
@@ -45,7 +39,6 @@ def load_secret(key_name):
 # ─── PDF Extraction ──────────────────────────────────────────
 
 def extract_pdf_text(uploaded_file):
-    """Extract raw text from an uploaded PDF using pdfplumber."""
     text = []
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
@@ -74,11 +67,6 @@ def chunk_text(text, chunk_size=150, overlap=70):
 
 @st.cache_data(show_spinner=False)
 def get_embeddings(texts_tuple: tuple) -> list:
-    """
-    Call HuggingFace Inference API for embeddings.
-    Accepts a tuple (hashable) so Streamlit can cache it.
-    Returns list of vectors.
-    """
     texts = list(texts_tuple)
     hf_key = load_secret("HF_API_KEY")
     model_id = "sentence-transformers/all-MiniLM-L6-v2"
@@ -93,12 +81,10 @@ def get_embeddings(texts_tuple: tuple) -> list:
         "Content-Type": "application/json",
         "Authorization": f"Bearer {hf_key}",
     }
-
     endpoint = (
         f"https://router.huggingface.co/hf-inference/models/"
         f"{model_id}/pipeline/feature-extraction"
     )
-
     response = requests.post(
         endpoint,
         headers=headers,
@@ -107,25 +93,17 @@ def get_embeddings(texts_tuple: tuple) -> list:
     )
 
     if response.status_code == 401:
-        raise ValueError(
-            "HuggingFace authentication failed (401). Check that HF_API_KEY is valid "
-            "and has Inference API access."
-        )
+        raise ValueError("HuggingFace authentication failed (401). Check HF_API_KEY.")
     if response.status_code != 200:
-        raise ValueError(
-            f"HuggingFace Embedding API error {response.status_code}: {response.text}"
-        )
+        raise ValueError(f"HuggingFace Embedding API error {response.status_code}: {response.text}")
 
     payload = response.json()
-
     if not payload:
         raise ValueError("HuggingFace Embedding API returned an empty response.")
 
-    # Case 1: Already sentence-level vectors → shape (N, D)
     if isinstance(payload[0], list) and isinstance(payload[0][0], (int, float)):
         return payload
 
-    # Case 2: Token-level vectors → shape (N, T, D) — apply mean pooling
     sentence_vectors = []
     for token_vecs in payload:
         if not token_vecs:
@@ -134,8 +112,24 @@ def get_embeddings(texts_tuple: tuple) -> list:
         dims = len(token_vecs[0])
         pooled = [sum(tv[i] for tv in token_vecs) / len(token_vecs) for i in range(dims)]
         sentence_vectors.append(pooled)
-
     return sentence_vectors
+
+# ─── In-Memory Vector Search (replaces ChromaDB) ─────────────
+
+def cosine_similarity(a, b):
+    a, b = np.array(a), np.array(b)
+    norm_a, norm_b = np.linalg.norm(a), np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+def query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=4):
+    scored = [
+        (cosine_similarity(resume_embedding, emb), chunk)
+        for emb, chunk in zip(job_embeddings, job_chunks)
+    ]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [chunk for _, chunk in scored[:n]]
 
 # ─── Core RAG + Generation Pipeline ─────────────────────────
 
@@ -151,41 +145,15 @@ def run_analysis(resume_text: str, job_description: str) -> str:
     job_clean = clean_text(job_description)
     job_chunks = chunk_text(job_clean)
 
-    # Embed job chunks + resume via HuggingFace API (no local model needed)
     with st.spinner("🔢 Generating embeddings via HuggingFace API..."):
         job_embeddings = get_embeddings(tuple(job_chunks))
         resume_embedding = get_embeddings((resume_clean,))[0]
 
-    # ChromaDB ephemeral in-memory client (safe for Streamlit Cloud)
-    if chromadb is None:
-    st.error("ChromaDB failed to load. Please check dependencies.")
-    st.stop()
-client = chromadb.EphemeralClient()
-
-    # Always create a fresh collection per analysis run
-    try:
-        chroma_client.delete_collection("job_desc")
-    except Exception:
-        pass
-    collection = chroma_client.create_collection("job_desc")
-
-    collection.add(
-        ids=[f"chunk_{i}" for i in range(len(job_chunks))],
-        documents=job_chunks,
-        embeddings=job_embeddings
-    )
-
-    results = collection.query(
-        query_embeddings=[resume_embedding],
-        n_results=min(4, len(job_chunks))
-    )
-
-    top_chunks = results["documents"][0]
+    top_chunks = query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=min(4, len(job_chunks)))
     retrieved_context = "\n\n".join(
         f"Chunk {i+1}:\n{chunk}" for i, chunk in enumerate(top_chunks)
     )
 
-    # ── Prompts ──
     system_prompt = (
         "You are an expert resume coach and ATS analyst.\n"
         "Your job is to compare a resume against a job description and provide:\n"
@@ -196,7 +164,6 @@ client = chromadb.EphemeralClient()
         "- Only use information from the resume and job description.\n"
         "- Keep the output practical, specific, and concise."
     )
-
     user_prompt = (
         f"RESUME:\n{resume_clean}\n\n"
         f"JOB DESCRIPTION:\n{job_clean}\n\n"
@@ -207,7 +174,7 @@ client = chromadb.EphemeralClient()
         "- List missing keywords that matter most.\n"
         "- Be strict about missing keywords.\n"
         "- Suggest 5 resume improvements.\n"
-        "- Write a tailored cover letter of about 200–300 words.\n\n"
+        "- Write a tailored cover letter of about 200-300 words.\n\n"
         "Use this exact format:\n\n"
         "ATS SUMMARY:\n...\n\n"
         "MATCHED KEYWORDS:\n...\n\n"
@@ -227,7 +194,6 @@ client = chromadb.EphemeralClient()
             ],
             temperature=0.3,
         )
-
     return response.choices[0].message.content
 
 # ─── Output Parsing Helpers ──────────────────────────────────
@@ -240,7 +206,7 @@ SECTION_KEYS = [
     "COVER LETTER:",
 ]
 
-def parse_section(output: str, key: str) -> str | None:
+def parse_section(output: str, key: str):
     if key not in output:
         return None
     text = output.split(key, 1)[1]
@@ -249,7 +215,7 @@ def parse_section(output: str, key: str) -> str | None:
             text = text.split(other, 1)[0]
     return text.strip()
 
-def extract_ats_score(text: str) -> int | None:
+def extract_ats_score(text: str):
     for m in re.finditer(r'\b(\d{1,3})\b', text or ""):
         score = int(m.group(1))
         if 0 <= score <= 100:
@@ -262,10 +228,9 @@ st.title("🎯 AI Job-Fit Analyzer")
 st.caption(
     "Upload your resume and paste a job description to get an ATS score, "
     "keyword gap analysis, and a tailored cover letter — powered by "
-    "Groq (Mistral) + HuggingFace embeddings."
+    "Groq + HuggingFace embeddings."
 )
 
-# Sidebar
 with st.sidebar:
     st.header("ℹ️ How It Works")
     st.markdown(
@@ -274,13 +239,13 @@ with st.sidebar:
         "3. **Click Analyze** — the app:\n"
         "   - Extracts & chunks the JD\n"
         "   - Embeds via HuggingFace API\n"
-        "   - Retrieves top chunks (ChromaDB)\n"
-        "   - Sends to Groq Mistral for analysis\n"
+        "   - Retrieves top chunks (cosine similarity)\n"
+        "   - Sends to Groq LLM for analysis\n"
         "4. **Download** your report"
     )
     st.divider()
     st.markdown("**Models Used**")
-    st.code("Embeddings: all-MiniLM-L6-v2\nLLM: mistral-saba-24b (Groq)", language="text")
+    st.code("Embeddings: all-MiniLM-L6-v2\nLLM: llama-3.1-8b-instant (Groq)", language="text")
 
 st.divider()
 
@@ -302,7 +267,6 @@ if st.button("🚀 Analyze My Resume", type="primary", use_container_width=True)
     elif not job_description.strip():
         st.error("⚠️ Please paste a job description.")
     else:
-        # Clear previous results
         st.session_state.pop("output_text", None)
 
         with st.spinner("🔍 Extracting text from your resume PDF..."):
@@ -325,8 +289,6 @@ if st.button("🚀 Analyze My Resume", type="primary", use_container_width=True)
             st.error(f"⚠️ Unexpected error: {e}")
             st.stop()
 
-# ─── Display Results ─────────────────────────────────────────
-
 if "output_text" in st.session_state:
     output_text = st.session_state["output_text"]
 
@@ -345,7 +307,6 @@ if "output_text" in st.session_state:
         section_text = parse_section(output_text, key)
         if not section_text:
             continue
-
         with st.expander(display_name, expanded=True):
             if key == "ATS SUMMARY:":
                 score = extract_ats_score(section_text)
