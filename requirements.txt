@@ -1,0 +1,5 @@
+streamlit
+pdfplumber
+chromadb
+groq
+requests
