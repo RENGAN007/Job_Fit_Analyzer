@@ -1,5 +1,6 @@
 streamlit
 pdfplumber
-chromadb
-groq
 requests
+groq
+numpy
+fpdf2

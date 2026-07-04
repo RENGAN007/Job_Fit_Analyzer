@@ -6,6 +6,12 @@ import pdfplumber
 import requests
 from groq import Groq
 
+from job_scraper import scrape_job_url
+from pdf_report import build_pdf_report
+from history_db import save_analysis, load_all_analyses, delete_analysis, clear_all_analyses
+from job_fetcher import fetch_recent_jobs
+
+
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Job-Fit Analyzer",
@@ -129,11 +135,117 @@ def query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=4):
         for emb, chunk in zip(job_embeddings, job_chunks)
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:n]
+
+
+# ─── Real-World-Style ATS Scoring ────────────────────────────
+GENERAL_SKILL_GROUPS = {
+    "Administration": ["administration", "administrative", "admin", "office support", "clerical"],
+    "Customer Service": ["customer service", "customer support", "client support", "front desk", "reception"],
+    "Communication": ["communication", "written communication", "verbal communication", "correspondence"],
+    "Organisation": ["organised", "organized", "attention to detail", "time management", "prioritisation"],
+    "Data Entry": ["data entry", "record keeping", "records", "database", "data accuracy"],
+    "Document Management": ["document management", "filing", "documentation", "records management"],
+    "Scheduling": ["scheduling", "calendar management", "appointments", "meeting coordination"],
+    "Reporting": ["reporting", "reports", "reconciliation", "tracking"],
+    "Microsoft Office": ["microsoft office", "word", "excel", "powerpoint", "outlook"],
+    "Project Coordination": ["project coordination", "coordination", "project support", "planning"],
+    "Problem Solving": ["problem solving", "troubleshooting", "issue resolution"],
+    "Leadership": ["leadership", "mentoring", "supervision", "training"],
+    "Sales": ["sales", "upselling", "business development", "lead generation"],
+    "Finance": ["invoicing", "accounts", "bookkeeping", "payroll", "billing"],
+    "CRM": ["crm", "salesforce", "hubspot", "zoho"],
+    "Programming": ["python", "java", "javascript", "typescript", "sql", "c++", "c#", "git"],
+    "Data Analysis": ["data analysis", "analytics", "dashboard", "power bi", "tableau"],
+    "Cloud/DevOps": ["aws", "azure", "gcp", "docker", "kubernetes", "ci/cd"],
+    "Software Engineering": ["software engineering", "software development", "api", "backend", "frontend", "agile"],
+    "Design": ["ui", "ux", "figma", "wireframes"],
+    "Compliance": ["compliance", "policy", "procedures", "regulatory"],
+}
+
+def _normalize_match_text(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^\w\s+#.+/-]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+def _term_in_text(term: str, text: str) -> bool:
+    term = _normalize_match_text(term)
+    text = _normalize_match_text(text)
+    if not term:
+        return False
+    if " " in term:
+        return term in text
+    return bool(re.search(rf"\b{re.escape(term)}\b", text))
+
+def extract_job_profile(job_text: str) -> list[str]:
+    text_norm = _normalize_match_text(job_text)
+    groups = [
+        group for group, terms in GENERAL_SKILL_GROUPS.items()
+        if any(_term_in_text(t, text_norm) for t in terms)
+    ]
+    return groups or ["Communication", "Organisation", "Problem Solving"]
+
+def compute_keyword_match(resume_text: str, job_groups: list[str]) -> dict:
+    resume_norm = _normalize_match_text(resume_text)
+    matched, missing = [], []
+    for group in job_groups:
+        terms = GENERAL_SKILL_GROUPS[group]
+        if any(_term_in_text(t, resume_norm) for t in terms):
+            matched.append(group)
+        else:
+            missing.append(group)
+    overall_rate = len(matched) / len(job_groups) if job_groups else 0.0
+    return {"matched": matched, "missing": missing, "overall_rate": overall_rate}
+
+def compute_semantic_component(resume_embedding, job_embeddings, top_n=4) -> float:
+    if not job_embeddings:
+        return 0.0
+    similarities = [cosine_similarity(resume_embedding, emb) for emb in job_embeddings]
+    top_sims = sorted(similarities, reverse=True)[:min(top_n, len(similarities))]
+    avg_sim = float(np.mean(top_sims))
+    return float(np.clip(avg_sim / 0.45 * 100, 0, 100))
+
+def compute_ats_score(
+    resume_text: str,
+    resume_embedding,
+    job_text: str,
+    job_embeddings,
+) -> tuple[int, dict]:
+    """
+    Generalised ATS score — broader categories, less strict scoring.
+    JD-specific coverage is kept under 35% weight so one job description
+    doesn't dominate the result.
+    """
+    job_groups = extract_job_profile(job_text)
+    match_info = compute_keyword_match(resume_text, job_groups)
+    semantic = compute_semantic_component(resume_embedding, job_embeddings)
+
+    keyword_pct = match_info["overall_rate"] * 100
+
+    # 35% JD coverage, 65% semantic relevance.
+    score = (0.35 * keyword_pct) + (0.65 * semantic)
+
+    # Soft floors so good resumes don't get punished too harshly.
+    if semantic >= 55:
+        score = max(score, 55)
+    if semantic >= 65 and keyword_pct >= 25:
+        score = max(score, 65)
+    if semantic >= 75 and keyword_pct >= 35:
+        score = max(score, 74)
+
+    final_score = int(round(np.clip(score, 20, 88)))
+
+    match_info["semantic_component"] = round(semantic, 1)
+    match_info["keyword_coverage_pct"] = round(keyword_pct, 1)
+    match_info["job_profile"] = job_groups
+    return final_score, match_info
     return [chunk for _, chunk in scored[:n]]
+
 
 # ─── Core RAG + Generation Pipeline ─────────────────────────
 
-def run_analysis(resume_text: str, job_description: str) -> str:
+def run_analysis(resume_text: str, job_description: str) -> tuple[str, int]:
     groq_key = load_secret("GROQ_API_KEY")
     if not groq_key:
         raise ValueError(
@@ -149,9 +261,16 @@ def run_analysis(resume_text: str, job_description: str) -> str:
         job_embeddings = get_embeddings(tuple(job_chunks))
         resume_embedding = get_embeddings((resume_clean,))[0]
 
+
+    ats_score, match_info = compute_ats_score(
+    resume_clean, resume_embedding, job_clean, job_embeddings)
+    matched_kw = ", ".join(match_info["matched"][:20]) or "None detected"
+    missing_kw = ", ".join(match_info["missing"][:20]) or "None detected"
+    top_scored = query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=min(4, len(job_chunks)))
     top_chunks = query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=min(4, len(job_chunks)))
     retrieved_context = "\n\n".join(
-        f"Chunk {i+1}:\n{chunk}" for i, chunk in enumerate(top_chunks)
+        f"Chunk {i+1} (similarity {sim:.2f}):\n{chunk}"
+        for i, (sim, chunk) in enumerate(top_scored)
     )
 
     system_prompt = (
@@ -165,18 +284,25 @@ def run_analysis(resume_text: str, job_description: str) -> str:
         "- Keep the output practical, specific, and concise."
     )
     user_prompt = (
-        f"RESUME:\n{resume_clean}\n\n"
-        f"JOB DESCRIPTION:\n{job_clean}\n\n"
-        f"RETRIEVED JOB CONTEXT:\n{retrieved_context}\n\n"
+        f"The ATS match score is {ats_score}/100 "
+        f"(keyword coverage: {match_info['keyword_coverage_pct']}%, "
+        f"semantic relevance: {match_info['semantic_component']}%).\n"
+        f"Matched categories: {matched_kw}\n"
+        f"Missing categories: {missing_kw}\n"
+        "Use this exact score in your summary — do not invent a different number.\n\n"
         "Instructions:\n"
-        "- Give a realistic ATS match estimate from 0 to 100.\n"
+        f"- Begin ATS SUMMARY with the exact line: ATS Match Score: {ats_score}/100\n"
+        "- Explain why the score is justified based on the resume and job description.\n"
+        "- Do not invent a different numeric score.\n"
         "- List the strongest matched keywords.\n"
         "- List missing keywords that matter most.\n"
-        "- Be strict about missing keywords.\n"
+        "- Be balanced about missing keywords — do not over-penalise transferable skills.\n"
         "- Suggest 5 resume improvements.\n"
         "- Write a tailored cover letter of about 200-300 words.\n\n"
         "Use this exact format:\n\n"
-        "ATS SUMMARY:\n...\n\n"
+        "ATS SUMMARY:\n"
+        f"ATS Match Score: {ats_score}/100\n"
+        "...\n\n"
         "MATCHED KEYWORDS:\n...\n\n"
         "MISSING KEYWORDS:\n...\n\n"
         "REWRITE SUGGESTIONS:\n- ...\n- ...\n- ...\n\n"
@@ -192,9 +318,13 @@ def run_analysis(resume_text: str, job_description: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
-            temperature=0.3,
+            temperature=0,
         )
+
+    return response.choices[0].message.content, ats_score
+
     return response.choices[0].message.content
+
 
 # ─── Output Parsing Helpers ──────────────────────────────────
 
@@ -216,11 +346,43 @@ def parse_section(output: str, key: str):
     return text.strip()
 
 def extract_ats_score(text: str):
+ 
+    explicit = re.search(
+        r"ATS\s+Match\s+Score:\s*(\d{1,3})\s*/\s*100",
+        text or "",
+        re.IGNORECASE,
+    )
+    if explicit:
+        score = int(explicit.group(1))
+        if 0 <= score <= 100:
+            return score
     for m in re.finditer(r'\b(\d{1,3})\b', text or ""):
+ 
         score = int(m.group(1))
         if 0 <= score <= 100:
             return score
     return None
+
+
+def inject_ats_score(output_text: str, score: int) -> str:
+    """Ensure the canonical embedding score appears in the ATS summary."""
+    summary = parse_section(output_text, "ATS SUMMARY:")
+    if summary is None:
+        return output_text
+    narrative = re.sub(
+        r"^(?:Estimated\s+)?ATS\s+(?:Match\s+)?(?:match\s+)?(?:score|estimate)[:\s]*"
+        r"\d{1,3}(?:\s*(?:out of|/)\s*100)?[^\n]*\n*",
+        "",
+        summary,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    new_summary = f"ATS Match Score: {score}/100\n\n{narrative}"
+    return output_text.replace(
+        f"ATS SUMMARY:\n{summary}",
+        f"ATS SUMMARY:\n{new_summary}",
+        1,
+    )
 
 # ─── UI ──────────────────────────────────────────────────────
 
@@ -241,22 +403,103 @@ with st.sidebar:
         "   - Embeds via HuggingFace API\n"
         "   - Retrieves top chunks (cosine similarity)\n"
         "   - Sends to Groq LLM for analysis\n"
+         "4. **Download** your report (PDF, TXT, or MD)"
+
         "4. **Download** your report"
-    )
+     )
     st.divider()
     st.markdown("**Models Used**")
     st.code("Embeddings: all-MiniLM-L6-v2\nLLM: llama-3.1-8b-instant (Groq)", language="text")
 
-st.divider()
+    st.divider()
+    st.header("🕘 Past Analyses")
+
+    history = load_all_analyses()
+
+    if not history:
+        st.caption("No analyses saved yet.")
+    else:
+        st.caption(f"{len(history)} analyse(s) saved")
+
+        for row in history:
+            score = row["ats_score"]
+            color = "🟢" if score >= 70 else "🟡" if score >= 50 else "🔴"
+            label = f"{color} {score}/100 · {row['timestamp']}"
+
+            with st.expander(label, expanded=False):
+                st.markdown(f"**📄 Resume:** {row['resume_filename']}")
+                st.markdown(f"**📋 JD snippet:** {row['job_snippet']}")
+
+                if st.button("📂 Load this result", key=f"load_{row['id']}"):
+                    st.session_state["output_text"]     = row["output_text"]
+                    st.session_state["ats_score"]       = row["ats_score"]
+                    st.session_state["resume_filename"] = row["resume_filename"]
+                    st.session_state["job_description"] = row["job_snippet"]
+                    st.rerun()
+
+                if st.button("🗑️ Delete", key=f"del_{row['id']}"):
+                    delete_analysis(row["id"])
+                    st.rerun()
+
+        st.divider()
+        if st.button("🧹 Clear All History", use_container_width=True):
+            clear_all_analyses()
+            st.rerun()
 
 col1, col2 = st.columns(2)
 with col1:
     uploaded_resume = st.file_uploader("📄 Upload Resume (PDF)", type=["pdf"])
 with col2:
-    job_description = st.text_area(
-        "📋 Paste Job Description",
-        height=300,
-        placeholder="Paste the full job description here..."
+    jd_tab1, jd_tab2 = st.tabs(["📋 Paste Job Description", "🔗 Fetch from URL"])
+
+    with jd_tab1:
+        job_description_input = st.text_area(
+            "Paste the full job description here",
+            height=280,
+            placeholder="Paste the full job description here...",
+            key="jd_text_input"
+        )
+
+    with jd_tab2:
+        job_url = st.text_input(
+            "Job URL",
+            placeholder="https://www.linkedin.com/jobs/view/... or seek.com.au/job/...",
+            key="jd_url_input"
+        )
+        fetch_col1, fetch_col2 = st.columns([1, 3])
+
+        with fetch_col1:
+            fetch_clicked = st.button("⬇️ Fetch JD", use_container_width=True)
+
+        with fetch_col2:
+            st.caption("Supports LinkedIn, Seek, Indeed, and most job boards")
+
+        if fetch_clicked:
+            if not job_url.strip():
+                st.error("⚠️ Please enter a job URL.")
+            else:
+                with st.spinner("🔍 Fetching job description from URL..."):
+                    try:
+                        fetched_jd = scrape_job_url(job_url)
+                        st.session_state["fetched_jd"] = fetched_jd
+                        st.success(f"✅ Fetched {len(fetched_jd.split())} words from job posting!")
+                    except Exception as e:
+                        st.error(f"⚠️ Could not fetch: {e}")
+                        st.session_state.pop("fetched_jd", None)
+
+        if "fetched_jd" in st.session_state:
+            edited_jd = st.text_area(
+                "Fetched Job Description (editable)",
+                value=st.session_state["fetched_jd"],
+                height=200,
+                key="fetched_jd_display"
+            )
+            st.session_state["fetched_jd"] = edited_jd
+
+    job_description = (
+        st.session_state.get("fetched_jd", "")
+        if st.session_state.get("fetched_jd")
+        else job_description_input
     )
 
 st.divider()
@@ -280,8 +523,38 @@ if st.button("🚀 Analyze My Resume", type="primary", use_container_width=True)
                 st.stop()
 
         try:
-            output_text = run_analysis(resume_text, job_description)
+            output_text, ats_score = run_analysis(resume_text, job_description)
+            output_text = inject_ats_score(output_text, ats_score)
             st.session_state["output_text"] = output_text
+            st.session_state["ats_score"] = ats_score
+            st.session_state["resume_filename"] = uploaded_resume.name
+            st.session_state["job_description"] = job_description
+            save_analysis(uploaded_resume.name, job_description, ats_score, output_text)
+            adzuna_id  = load_secret("ADZUNA_APP_ID")
+            adzuna_key = load_secret("ADZUNA_APP_KEY")
+            if adzuna_id and adzuna_key:
+                try:
+                    groq_key    = load_secret("GROQ_API_KEY")
+                    groq_model  = load_secret("GROQ_MODEL") or "llama-3.1-8b-instant"
+                    client_groq = Groq(api_key=groq_key)
+                    with st.spinner("🔎 Finding recent job openings near your location..."):
+                        jobs, jt, skills, loc = fetch_recent_jobs(
+                            resume_text    = resume_text,
+                            groq_client    = client_groq,
+                            groq_model     = groq_model,
+                            adzuna_app_id  = adzuna_id,
+                            adzuna_app_key = adzuna_key,
+                            country        = "au",
+                            results        = 8,
+                        )
+                    st.session_state["recent_jobs"]         = jobs
+                    st.session_state["jobs_query_title"]    = jt
+                    st.session_state["jobs_query_skills"]   = skills
+                    st.session_state["jobs_query_location"] = loc
+                    st.session_state.pop("jobs_error", None)
+                except Exception as e:
+                    st.session_state["recent_jobs"] = []
+                    st.session_state["jobs_error"]  = str(e)
         except ValueError as e:
             st.error(f"⚠️ {e}")
             st.stop()
@@ -309,7 +582,7 @@ if "output_text" in st.session_state:
             continue
         with st.expander(display_name, expanded=True):
             if key == "ATS SUMMARY:":
-                score = extract_ats_score(section_text)
+                score = st.session_state.get("ats_score") or extract_ats_score(section_text)
                 if score is not None:
                     st.markdown(f"### ATS Score: **{score} / 100**")
                     color = (
@@ -327,8 +600,37 @@ if "output_text" in st.session_state:
 
     st.divider()
 
-    dl1, dl2 = st.columns(2)
+    resume_filename = st.session_state.get("resume_filename", "")
+    job_desc = st.session_state.get("job_description", "")
+    try:
+        pdf_bytes = build_pdf_report(
+            output_text,
+            resume_filename=resume_filename,
+            job_description=job_desc,
+            ats_score=st.session_state.get("ats_score"),
+        )
+    except Exception as e:
+        pdf_bytes = None
+        st.warning(f"PDF generation failed: {e}")
+
+    dl1, dl2, dl3 = st.columns(3)
     with dl1:
+        if pdf_bytes:
+            st.download_button(
+                "⬇️ Download PDF Report",
+                data=pdf_bytes,
+                file_name="job_fit_report.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary",
+            )
+        else:
+            st.button(
+                "⬇️ Download PDF Report",
+                disabled=True,
+                use_container_width=True,
+            )
+    with dl2:
         st.download_button(
             "⬇️ Download Report (.txt)",
             data=output_text,
@@ -336,11 +638,55 @@ if "output_text" in st.session_state:
             mime="text/plain",
             use_container_width=True
         )
-    with dl2:
+    with dl3:
         st.download_button(
             "⬇️ Download Report (.md)",
             data=output_text,
             file_name="job_coach_output.md",
             mime="text/markdown",
             use_container_width=True
+        )
+
+# ─── Recent Job Listings ──────────────────────────────────────────────────────
+if "output_text" in st.session_state:
+    recent_jobs = st.session_state.get("recent_jobs", [])
+    st.divider()
+
+    if "jobs_error" in st.session_state:
+        st.error(f"⚠️ Job fetch error: {st.session_state['jobs_error']}")
+    elif recent_jobs:
+        jt          = st.session_state.get("jobs_query_title", "")
+        skills      = st.session_state.get("jobs_query_skills", "")
+        loc_display = st.session_state.get("jobs_query_location", "")
+        loc_label   = f" · 📍 Near **{loc_display}**" if loc_display else " · 🌏 Australia-wide"
+        st.subheader("🔎 Recent Job Openings")
+        st.caption(f"Matched on: **{jt}** · Skills: {skills}{loc_label} · {len(recent_jobs)} listing(s) found")
+
+        for job in recent_jobs:
+            with st.container():
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    st.markdown(f"### [{job['title']}]({job['url']})")
+                    st.markdown(
+                        f"🏢 **{job['company']}** &nbsp;|&nbsp; "
+                        f"📍 {job['location']} &nbsp;|&nbsp; "
+                        f"💰 {job['salary']} &nbsp;|&nbsp; "
+                        f"🕐 {job['posted']}"
+                    )
+                    st.caption(job['snippet'])
+                with c2:
+                    st.link_button("Apply →", job['url'], use_container_width=True)
+                st.divider()
+    elif "jobs_query_title" in st.session_state:
+        loc_display = st.session_state.get("jobs_query_location", "")
+        loc_msg     = f" near **{loc_display}**" if loc_display else ""
+        st.warning(
+            f"🔎 No job listings found{loc_msg} even after broadening the search. "
+            f"Extracted title: **{st.session_state.get('jobs_query_title', 'unknown')}**. "
+            "Try re-running the analysis."
+        )
+    else:
+        st.info(
+            "💡 Add **ADZUNA_APP_ID** and **ADZUNA_APP_KEY** to your Streamlit secrets "
+            "to enable nearby job listings. Get free keys at [developer.adzuna.com](https://developer.adzuna.com)"
         )
