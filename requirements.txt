@@ -1,6 +1,7 @@
 streamlit
+numpy
 pdfplumber
 requests
 groq
-numpy
-fpdf2
+beautifulsoup4
+lxml
