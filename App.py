@@ -5,7 +5,6 @@ import numpy as np
 import pdfplumber
 import requests
 from groq import Groq
-
 from job_scraper import scrape_job_url
 from pdf_report import build_pdf_report
 from history_db import save_analysis, load_all_analyses, delete_analysis, clear_all_analyses
