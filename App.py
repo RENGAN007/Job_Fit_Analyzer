@@ -14,7 +14,7 @@ from job_fetcher import fetch_recent_jobs
 
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Job-Fit Analyzer",
+    page_title="Jobbie-AI Resume Analyser",
     page_icon="🎯",
     layout="wide"
 )
@@ -403,8 +403,14 @@ with st.sidebar:
         "   - Embeds via HuggingFace API\n"
         "   - Retrieves top chunks (cosine similarity)\n"
         "   - Sends to Groq LLM for analysis\n"
+        "   - Does keyword matching and semantic analysis\n"
+        "   - Calculates ATS score\n"
+        "   - Generates a summary of the analysis\n"
+        "   - Generates a tailored cover letter\n"
+        "   - Generates a rewrite suggestions\n"
+       
          "4. **Download** your report (PDF, TXT, or MD)"
-
+        "   - Shows recent job openings near your location"
         "4. **Download** your report"
      )
     st.divider()
