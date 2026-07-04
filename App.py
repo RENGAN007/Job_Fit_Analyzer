@@ -263,8 +263,8 @@ def run_analysis(resume_text: str, job_description: str) -> tuple[str, int]:
 
     ats_score, match_info = compute_ats_score(
     resume_clean, resume_embedding, job_clean, job_embeddings)
-    matched_kw = ", ".join(match_info["matched"][:20]) or "None detected"
-    missing_kw = ", ".join(match_info["missing"][:20]) or "None detected"
+    matched_kw = ", ".join(match_info["matched"]) or "None detected"
+    missing_kw = ", ".join(match_info["missing"]) or "None detected"
     top_scored = query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=min(4, len(job_chunks)))
     top_chunks = query_top_chunks(job_chunks, job_embeddings, resume_embedding, n=min(4, len(job_chunks)))
     retrieved_context = "\n\n".join(
