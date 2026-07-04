@@ -14,8 +14,8 @@ from job_fetcher import fetch_recent_jobs
 
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Jobbie-AI Resume Analyser",
-    page_icon="🎯",
+    page_title="🎯 Jobbie-AI - Get your resume ready for the job market",
+    page_icon="📝",
     layout="wide"
 )
 
@@ -386,7 +386,7 @@ def inject_ats_score(output_text: str, score: int) -> str:
 
 # ─── UI ──────────────────────────────────────────────────────
 
-st.title("🎯 Jobbie-AI - Get your resume ready for the job market")
+st.title("🎯 Jobbie-AI-Resume Analyser")
 st.caption(
     "Upload your resume and paste a job description to get an ATS score, "
     "keyword gap analysis, and a tailored cover letter — powered by "
