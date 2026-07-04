@@ -386,7 +386,7 @@ def inject_ats_score(output_text: str, score: int) -> str:
 
 # ─── UI ──────────────────────────────────────────────────────
 
-st.title("🎯 AI Job-Fit Analyzer")
+st.title("🎯 Jobbie-AI - Get your resume ready for the job market")
 st.caption(
     "Upload your resume and paste a job description to get an ATS score, "
     "keyword gap analysis, and a tailored cover letter — powered by "
