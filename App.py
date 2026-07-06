@@ -396,7 +396,10 @@ st.caption(
     "keyword gap analysis, and a tailored cover letter — powered by "
     "Groq + HuggingFace embeddings."
 )
-
+st.caption(
+    "Note : This application is a demonstration of how it works and is still under development"
+     "and you might notice some new changes as I update my repository"
+)
 with st.sidebar:
     st.header("ℹ️ How It Works")
     st.markdown(
