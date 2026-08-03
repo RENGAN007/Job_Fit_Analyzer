@@ -553,50 +553,7 @@ Keyword Matching   Semantic Score
  │ Rewrite Suggestions     │
  │ Tailored Cover Letter   │
  └─────────────────────────┘
-```
 
----
-
-# 🔬 NLP / ML Concepts Demonstrated
-
-This project demonstrates practical implementation of several AI concepts:
-
-### Natural Language Processing
-
-* Text extraction
-* Text cleaning
-* Text chunking
-* Keyword matching
-* Semantic representation
-
-### Transformer Models
-
-* Sentence embeddings
-* `all-MiniLM-L6-v2`
-* Hugging Face inference
-
-### Semantic Search
-
-* Vector representations
-* Cosine similarity
-* Top-k retrieval
-
-### LLM Application Development
-
-* Prompt engineering
-* Structured LLM outputs
-* Resume analysis
-* Controlled generation
-
-### Machine Learning Engineering
-
-* API integration
-* Data preprocessing
-* Caching
-* Error handling
-* Application deployment architecture
-
----
 
 # 🎯 Why I Built This
 
@@ -721,7 +678,7 @@ Bachelor of Artificial Intelligence and Data Science — Bannari Amman Institute
 ### Connect
 
 * LinkedIn: https://www.linkedin.com/in/srirengan-g
-* GitHub: `YOUR_GITHUB_URL`
+* GitHub: https://github.com/RENGAN007
 
 ---
 
