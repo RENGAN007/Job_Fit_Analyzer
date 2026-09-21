@@ -253,4 +253,7 @@ def build_pdf_report(
     pdf.set_text_color(55, 65, 81)
     pdf.multi_cell(usable_w, 4.2, _pdf_text(cover_letter))
 
-    return pdf.output(dest="S").encode("latin-1")
+    pdf_bytes = pdf.output(dest="S")
+    if isinstance(pdf_bytes, str):
+        pdf_bytes = pdf_bytes.encode("latin-1")
+    return bytes(pdf_bytes)
