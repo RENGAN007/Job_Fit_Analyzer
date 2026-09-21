@@ -10,6 +10,13 @@ from pdf_report import build_pdf_report
 from history_db import save_analysis, load_all_analyses, delete_analysis, clear_all_analyses
 from job_fetcher import fetch_recent_jobs
 
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+DEPRECATED_GROQ_MODELS = {
+    "llama-3.1-8b-instant": DEFAULT_GROQ_MODEL,
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama3-8b-8192": DEFAULT_GROQ_MODEL,
+    "llama3-70b-8192": "openai/gpt-oss-120b",
+}
 
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
