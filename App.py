@@ -11,6 +11,16 @@ from pdf_report import build_pdf_report
 from history_db import save_analysis, load_all_analyses, delete_analysis, clear_all_analyses
 from job_fetcher import fetch_recent_jobs
 
+# Groq retired llama-3.1-8b-instant (and llama-3.3-70b-versatile) on 2026-08-16
+# for free/developer tiers. openai/gpt-oss-20b is the documented replacement.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+DEPRECATED_GROQ_MODELS = {
+    "llama-3.1-8b-instant": DEFAULT_GROQ_MODEL,
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+    "llama3-8b-8192": DEFAULT_GROQ_MODEL,
+    "llama3-70b-8192": "openai/gpt-oss-120b",
+}
+
 
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
@@ -41,6 +51,11 @@ def load_secret(key_name):
     except FileNotFoundError:
         pass
     return None
+
+
+def resolve_groq_model() -> str:
+    model = load_secret("GROQ_MODEL") or DEFAULT_GROQ_MODEL
+    return DEPRECATED_GROQ_MODELS.get(model, model)
 
 # ─── PDF Extraction ──────────────────────────────────────────
 
@@ -309,7 +324,7 @@ def run_analysis(resume_text: str, job_description: str) -> tuple[str, int]:
         "COVER LETTER:\n..."
     )
 
-    groq_model = load_secret("GROQ_MODEL") or "llama-3.1-8b-instant"
+    groq_model = resolve_groq_model()
     with st.spinner(f"🤖 Generating analysis with Groq ({groq_model})..."):
         client_groq = Groq(api_key=groq_key)
         response = client_groq.chat.completions.create(
@@ -415,7 +430,7 @@ with st.sidebar:
      )
     st.divider()
     st.markdown("**Models Used**")
-    st.code("Embeddings: all-MiniLM-L6-v2\nLLM: llama-3.1-8b-instant (Groq)", language="text")
+    st.code(f"Embeddings: all-MiniLM-L6-v2\nLLM: {DEFAULT_GROQ_MODEL} (Groq)", language="text")
 
     st.divider()
     st.header("🕘 Past Analyses")
@@ -541,7 +556,7 @@ if st.button("🚀 Analyze My Resume", type="primary", use_container_width=True)
             if adzuna_id and adzuna_key:
                 try:
                     groq_key    = load_secret("GROQ_API_KEY")
-                    groq_model  = load_secret("GROQ_MODEL") or "llama-3.1-8b-instant"
+                    groq_model  = resolve_groq_model()
                     client_groq = Groq(api_key=groq_key)
                     with st.spinner("🔎 Finding recent job openings near your location..."):
                         jobs, jt, skills, loc = fetch_recent_jobs(
