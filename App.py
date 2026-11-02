@@ -25,7 +25,7 @@ DEPRECATED_GROQ_MODELS = {
  
 # ─── Page Config ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="🎯 Jobbie-AI - Get your resume ready for the job market",
+    page_title="🎯 Jobbie-AI - Helps you get a relevant job to your resume!",
     page_icon="📝",
     layout="wide"
 )
